@@ -1,6 +1,6 @@
 {
   "name": "Bhagavad Gita AI Spiritual Guide",
-  "image": "mcr.microsoft.com/devcontainers/python:0-3.11-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "version": "18" // Or "20" for Node.js 20, choose a stable version
