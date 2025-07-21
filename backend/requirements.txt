@@ -12,3 +12,9 @@ faiss-cpu==1.8.0
 unstructured[md]==0.18.9 # Updated to a version that supports Python 3.12
 unstructured-inference==0.7.25
 transformers==4.42.3
+pandas
+uvicorn[standard]
+openpyxl # Good to have for Excel, though not strictly required for CSV
+langchain-openai
+langchain-huggingface
+
