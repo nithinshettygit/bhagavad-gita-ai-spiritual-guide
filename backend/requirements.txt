@@ -1,20 +1,62 @@
-# backend/requirements.txt
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-langchain-community==0.2.19 # Changed to 0.2.19
-langchain-core==0.2.43 # Changed to 0.2.19
-langchain==0.2.17 
-langgraph==0.1.7
-python-dotenv==1.0.1
-pydantic==2.8.2
-sentence-transformers==2.7.0
-faiss-cpu==1.8.0
-unstructured[md]==0.18.9 # Updated to a version that supports Python 3.12
-unstructured-inference==0.7.25
-transformers==4.42.3
-pandas
-uvicorn[standard]
-openpyxl # Good to have for Excel, though not strictly required for CSV
-langchain-openai
-langchain-huggingface
+# # backend/requirements.txt
+# fastapi==0.111.0
+# uvicorn[standard]==0.30.1
+# langchain-community==0.2.19 # Changed to 0.2.19
+# langchain-core==0.2.43 # Changed to 0.2.19
+# langchain==0.2.17 
+# langgraph==0.1.7
+# python-dotenv==1.0.1
+# pydantic==2.8.2
+# sentence-transformers==2.7.0
+# faiss-cpu==1.8.0
+# unstructured[md]==0.18.9 # Updated to a version that supports Python 3.12
+# unstructured-inference==0.7.25
+# transformers==4.42.3
+# pandas
+# uvicorn[standard]
+# openpyxl # Good to have for Excel, though not strictly required for CSV
+# langchain-openai
+# langchain-huggingface
+# langchain-groq
+# langchain-text-splitters
+# langchain-chroma
+# sentence-transformers 
+# pydantic
 
+
+# backend/requirements.txt
+
+# FastAPI and Uvicorn
+fastapi==0.111.0
+uvicorn[standard]==0.30.1 # Listed once and correctly
+
+# Core Python libraries
+python-dotenv==1.0.1
+pandas
+pydantic==2.8.2 # Keep pinned if you need this specific version, otherwise unpin
+
+# AI/ML Specific Libraries
+torch # Assuming you have CUDA or CPU setup for torch
+sentence-transformers # No specific pin, allow latest compatible
+faiss-cpu==1.8.0 # Keep pinned, specific FAISS versions can be tricky
+
+# LangChain and all its related integration packages
+# **** IMPORTANT: NO VERSION PINS HERE ****
+# This allows pip to install the latest compatible versions for each,
+# which should resolve the dependency conflicts and ensure InMemoryChatMessageHistory works.
+langchain
+langchain-core
+langchain-community
+langchain-groq
+langchain-text-splitters
+langchain-openai        # Include if you use OpenAI models elsewhere (e.g., rag_utils.py)
+langchain-huggingface   # Include if you use HuggingFace models via LangChain elsewhere
+langchain-chroma        # Include if you use ChromaDB elsewhere
+langgraph               # Include if you use LangGraph
+langsmith               # Include if you use LangSmith for tracing/monitoring
+
+# Other packages from your previous list (add if still needed for your project):
+# unstructured[md]==0.18.9
+# unstructured-inference==0.7.25
+# transformers==4.42.3
+# openpyxl
