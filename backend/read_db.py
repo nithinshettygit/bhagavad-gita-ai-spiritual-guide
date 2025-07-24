@@ -11,19 +11,26 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # NEW IMPORTS FOR MULTI-QUERY RETRIEVER AND TOOLS
 from langchain.retrievers import MultiQueryRetriever
 from langchain_core.tools import tool # For defining tools
 from langchain.agents import create_tool_calling_agent, AgentExecutor # For creating and executing the agent
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel # For creating complex chains
-
+from langchain_core.output_parsers import StrOutputParser # For parsing LLM output to string
 
 import sqlite3
 import json
+import logging
 
-from langchain_core.runnables import RunnableLambda
+# Configure logging for LangChain to see agent's thoughts
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("langchain.agents").setLevel(logging.INFO)
+logging.getLogger("langchain.llms").setLevel(logging.INFO)
+logging.getLogger("langchain.chains").setLevel(logging.INFO)
+logging.getLogger("langchain.retrievers").setLevel(logging.INFO)
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -39,8 +46,8 @@ CHAT_HISTORY_DB = "chat_history.db"
 # --- FastAPI App Initialization ---
 app = FastAPI(
     title="Bhagavad Gita AI Spiritual Guide",
-    description="An AI assistant for the Bhagavad Gita, powered by Groq and RAG.",
-    version="1.0.0",
+    description="An AI assistant for the Bhagavad Gita, powered by Groq and RAG, with advanced agentic capabilities.",
+    version="1.1.0",
 )
 
 # Global variables to store initialized components
@@ -50,10 +57,11 @@ llm = None
 processed_df = None
 
 
-# --- Tool Definition ---
-# This function will be called by the LLM when it decides to use the tool
+# --- Tool Definitions ---
+
 @tool
-def get_verse_content(chapter_num: int, verse_num: int) -> str:
+def get_verse_content(chapter_num: int = Field(..., description="The chapter number of the Bhagavad Gita."),
+                      verse_num: int = Field(..., description="The verse number within the specified chapter.")) -> str:
     """
     Retrieves the exact content of a specific verse from the Bhagavad Gita
     given its chapter and verse number.
@@ -72,7 +80,7 @@ def get_verse_content(chapter_num: int, verse_num: int) -> str:
     ]
 
     if verse_data.empty:
-        return f"Verse not found for Chapter {chapter_num}, Verse {verse_num} in the Bhagavad Gita data. Please verify the chapter and verse numbers."
+        return f"Verse not found for Chapter {chapter_num}, Verse {verse_num} in the Bhagavad Gita data. Please verify the chapter and verse numbers and try again."
 
     content = None
     if 'text' in verse_data.columns:
@@ -83,7 +91,95 @@ def get_verse_content(chapter_num: int, verse_num: int) -> str:
     if content is None:
         return "Error: Verse content column ('text' or 'processed_content') not found in CSV. Please inform the user about this internal issue."
     
-    return f"Retrieved content for Chapter {chapter_num}, Verse {verse_num}: {content}"
+    return f"Retrieved content for Chapter {chapter_num}, Verse {verse_num}:\n{content}"
+
+
+# Simple in-memory glossary for demonstration
+BHAGAVAD_GITA_GLOSSARY = {
+    "dharma": "Righteous conduct; moral duty; the natural law governing the universe; one's purpose in life.",
+    "karma": "Action; the universal law of cause and effect, where every action (physical or mental) creates corresponding reactions.",
+    "moksha": "Liberation from the cycle of birth and death (samsara); spiritual liberation; ultimate freedom.",
+    "yoga": "Union; various spiritual disciplines aimed at uniting the individual soul (Atman) with the Universal Soul (Brahman). Refers to different paths like Karma Yoga (action), Jnana Yoga (knowledge), Bhakti Yoga (devotion), and Dhyana Yoga (meditation).",
+    "atman": "The individual soul or self; the true self beyond identification with the phenomenal world.",
+    "brahman": "The ultimate reality; the absolute; the supreme cosmic spirit; the universal consciousness.",
+    "samsara": "The cycle of birth, death, and rebirth; the continuous flow of worldly existence.",
+    "guna": "Qualities or attributes of nature (Prakriti): Sattva (goodness, purity), Rajas (passion, activity), Tamas (ignorance, inertia). All material existence is composed of these three gunas.",
+    "maya": "Illusion; the power by which Brahman creates the phenomenal world; the veil that obscures the true nature of reality.",
+    "bhakti": "Devotion; loving adoration of God or a divine form.",
+    "jnana": "Knowledge; wisdom; especially spiritual knowledge leading to liberation.",
+    "sannyasa": "Renunciation; the path of renouncing worldly attachments and pursuits.",
+    "tapas": "Austerity; spiritual discipline involving self-control and penance.",
+    "buddhi": "Intellect; discriminating faculty; spiritual discernment."
+}
+
+@tool
+def get_glossary_definition(term: str = Field(..., description="The Sanskrit term or philosophical concept to define.")) -> str:
+    """
+    Looks up and retrieves the definition of a specific Sanskrit term or philosophical concept
+    related to the Bhagavad Gita.
+    Use this tool when the user asks for the meaning of a specific term, e.g., "What is Dharma?"
+    or "Define Karma."
+    """
+    normalized_term = term.lower().strip()
+    definition = BHAGAVAD_GITA_GLOSSARY.get(normalized_term)
+    if definition:
+        return f"Definition of '{term}': {definition}"
+    else:
+        return f"Definition for '{term}' not found in the glossary. Perhaps you can find more context in the verses."
+
+
+@tool
+def find_related_verses(topic_query: str = Field(..., description="A query describing the topic or concept for which related verses are needed.")) -> str:
+    """
+    Finds and retrieves verses from the Bhagavad Gita that are related to a given topic or concept.
+    This tool performs a semantic search to find verses that discuss the specified topic.
+    Use this when the user asks for 'other verses about...', 'passages discussing...', or 'similar teachings on...'.
+    """
+    global faiss_db # Access the global FAISS database
+
+    if faiss_db is None:
+        return "Error: Vector store not loaded. Cannot find related verses."
+
+    # Use the FAISS retriever to find relevant documents (verses)
+    # We'll limit to 3 for brevity, but this can be adjusted.
+    retrieved_docs = faiss_db.similarity_search(topic_query, k=3) 
+    
+    if not retrieved_docs:
+        return f"No related verses found for the topic: '{topic_query}'."
+
+    verses_info = []
+    for doc in retrieved_docs:
+        chapter = doc.metadata.get('Chapter', 'N/A')
+        verse = doc.metadata.get('Verse', 'N/A')
+        content = doc.page_content # Assumes page_content holds the verse text
+        verses_info.append(f"Chapter {chapter}, Verse {verse}: \"{content[:150]}...\"") # Truncate for summary
+
+    return "Related verses found:\n" + "\n".join(verses_info)
+
+
+@tool
+def summarize_text(text: str = Field(..., description="The text content to be summarized.")) -> str:
+    """
+    Summarizes a given piece of text.
+    Use this tool when you have a long piece of information (e.g., from retrieved context)
+    and need to provide a concise summary to the user or to yourself for internal processing.
+    """
+    global llm # Access the global LLM
+
+    if llm is None:
+        return "Error: Language model not loaded. Cannot perform summarization."
+
+    summarization_prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a concise summarization assistant. Summarize the following text briefly and accurately, focusing on the main points."),
+        ("human", "{text}")
+    ])
+    summarization_chain = summarization_prompt | llm | StrOutputParser()
+
+    try:
+        summary = summarization_chain.invoke({"text": text})
+        return f"Summary of the provided text: {summary}"
+    except Exception as e:
+        return f"Error during summarization: {e}. Could not summarize the text."
 
 
 # --- SQLite-backed chat history implementation (UNCHANGED) ---
@@ -147,14 +243,13 @@ class SQLiteChatMessageHistory:
             tool_call_id = row["tool_call_id"]
             name = row["name"]
 
-            # Handle ToolMessage type during loading
             if msg_type == "human":
                 messages.append(HumanMessage(content=content, **lc_kwargs_loaded, example=example, name=name))
             elif msg_type == "ai":
                 messages.append(AIMessage(content=content, **lc_kwargs_loaded, example=example, tool_calls=tool_calls, name=name))
             elif msg_type == "system":
                 messages.append(SystemMessage(content=content, **lc_kwargs_loaded, name=name))
-            elif msg_type == "tool": # New: Handle ToolMessage type
+            elif msg_type == "tool":
                 messages.append(ToolMessage(content=content, tool_call_id=tool_call_id, name=name))
         return messages
 
@@ -181,7 +276,7 @@ class SQLiteChatMessageHistory:
                 "INSERT INTO messages (session_id, type, content, lc_kwargs, example, tool_calls, tool_call_id, name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (self.session_id, msg_type, content, lc_kwargs, example, tool_calls_to_store, tool_call_id, name)
             )
-        print(f"Added message ({msg_type}) for session {self.session_id}: {content[:50]}...")
+        # print(f"Added message ({msg_type}) for session {self.session_id}: {content[:50]}...") # Too verbose for production logging
 
     def add_messages(self, messages: list[BaseMessage]):
         for message in messages:
@@ -273,9 +368,9 @@ async def startup_event():
         try:
             llm = ChatGroq(
                 api_key=groq_api_key,
-                model_name="llama3-8b-8192",
+                model_name="llama3-8b-8192", # Using Llama 3 8B
                 temperature=0.5,
-                max_tokens=512
+                max_tokens=1024 # Increased max_tokens for longer responses/summaries
             )
             print(f"Groq LLM initialized with model: {llm.model_name}")
         except Exception as e:
@@ -301,10 +396,17 @@ async def read_root():
     return {"message": "Welcome to Bhagavad Gita AI Spiritual Guide. Use /docs to explore the API."}
 
 @app.get("/verse/{chapter_num}/{verse_num}")
-async def get_verse_by_number(chapter_num: int, verse_num: int):
+async def get_verse_by_number_direct(chapter_num: int, verse_num: int):
+    # This is a direct API endpoint, not using the LLM tool
+    # It allows for direct lookup if a UI needs it
     if processed_df is None:
         raise HTTPException(status_code=503, detail="Verse data not loaded. Please wait for server startup or check logs.")
 
+    # Call the tool function directly
+    # Note: the tool function returns a string with "Retrieved content for...",
+    # for a direct API call, we might want just the raw content.
+    # Let's adjust the tool or create a helper for this direct endpoint if needed.
+    # For now, let's just use the direct df lookup like before:
     verse_data = processed_df[
         (processed_df['Chapter'] == chapter_num) &
         (processed_df['Verse'] == verse_num)
@@ -334,6 +436,8 @@ class QueryRequest(BaseModel):
 
 @app.post("/ask")
 async def ask_krishna_ai(request: QueryRequest):
+    global llm, faiss_db # Ensure globals are accessible
+
     if llm is None or faiss_db is None:
         raise HTTPException(status_code=503, detail="AI or vector store not ready. Check server logs for initialization errors.")
 
@@ -341,17 +445,39 @@ async def ask_krishna_ai(request: QueryRequest):
     user_id = request.user_id 
     print(f"Query received for user '{user_id}': '{query}'")
 
-    # Define the tools available to the agent
-    tools = [get_verse_content]
+    # Define all available tools
+    tools = [get_verse_content, get_glossary_definition, find_related_verses, summarize_text]
 
     # Initialize the MultiQueryRetriever
     multiquery_retriever = MultiQueryRetriever.from_llm(
-        retriever=faiss_db.as_retriever(), # Use your existing FAISS retriever as the base
+        retriever=faiss_db.as_retriever(search_kwargs={"k": 5}), # Retrieve more documents for richer context
         llm=llm, # Use your Groq LLM to generate new queries
     )
 
-    # Define the agent's prompt
-    # This prompt is designed for a tool-calling agent and will receive context from the retriever
+    # --- Self-Correction/Reflection Chain ---
+    # This chain takes the initial answer, query, and context, and provides feedback.
+    # It acts as a critic.
+    reflection_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        You are a critical self-reflection assistant.
+        Your task is to review an AI's initial answer to a user's question, given the original query and the context/tool outputs used.
+        Evaluate the answer for accuracy, completeness, relevance, and adherence to the persona of DivineGuide-Shri Krishna.
+        
+        Provide constructive feedback. If the answer is perfect, state 'Answer is excellent.'
+        If there are issues, clearly state what could be improved or what was missed.
+        Focus on how the answer could be more aligned with the Bhagavad Gita's wisdom and the persona.
+        
+        Original Query: {query}
+        Initial Answer: {answer}
+        Retrieved Context/Tool Outputs: {context} (This includes documents and outputs from tools if used)
+        """),
+        ("human", "Please review the initial answer and provide feedback for improvement."),
+    ])
+    # The reflection chain will just use the base LLM to generate text feedback
+    reflection_chain = reflection_prompt | llm | StrOutputParser()
+
+    # --- Main Agent Prompt ---
+    # This prompt guides the primary agent that uses RAG and tools, and later will incorporate reflection.
     agent_prompt = ChatPromptTemplate.from_messages([
         ("system", """
         You are DivineGuide-Shri Krishna, a wise, compassionate, and patient spiritual mentor.
@@ -359,11 +485,18 @@ async def ask_krishna_ai(request: QueryRequest):
 
         You have access to the following tools: {tools}
 
-        When asked for specific verse content by chapter and verse number (e.g., "What does chapter 2, verse 47 say?", "Quote verse 3.14"), you MUST use the `get_verse_content` tool to retrieve the exact text.
-        For general questions, first consider the relevant context from the Bhagavad Gita provided below.
-        Combine information from the retrieved context and any tool outputs to formulate your answer.
-        If the answer is not found in the context or via tools, or if the question is outside the scope of spiritual guidance or the Gita, politely state that you cannot answer from the provided information in the context, or that the question is beyond your current capacity as DivineGuide-Shri Krishna. Do not make up answers.
-        Ensure your responses resonate with the wisdom and tone of the Bhagavad Gita.
+        Carefully consider the user's question, the chat history, and the retrieved context from the Bhagavad Gita.
+        
+        **Instructions for Tool Use:**
+        -   Use `get_verse_content` when the user explicitly asks for a verse by chapter and verse number (e.g., "What does 2.47 say?").
+        -   Use `get_glossary_definition` when the user asks for the definition of a specific Sanskrit term (e.g., "What is Dharma?").
+        -   Use `find_related_verses` when the user asks for other verses on a topic (e.g., "Are there other verses about renunciation?").
+        -   Use `summarize_text` internally if you retrieve very long documents and need to summarize them to fit your thought process or provide a concise overview to the user.
+
+        **Instructions for Answering:**
+        -   Combine information from retrieved context and any tool outputs to formulate your answer.
+        -   Maintain the wise and compassionate tone of Shri Krishna.
+        -   If an answer is not found in the context or via tools, or if the question is outside the scope of spiritual guidance or the Gita, politely state that you cannot answer from the provided information or that the question is beyond your current capacity. Do not make up answers.
         
         Retrieved Context: {context}
         """),
@@ -372,57 +505,114 @@ async def ask_krishna_ai(request: QueryRequest):
         MessagesPlaceholder(variable_name="agent_scratchpad"), # This is where the agent puts its thoughts and tool outputs
     ])
 
-    # Bind tools to the LLM
+    # Bind tools to the LLM (this LLM will be used by the agent to decide on tool calls)
     llm_with_tools = llm.bind_tools(tools)
 
     # Create the agent
     agent = create_tool_calling_agent(llm_with_tools, tools, agent_prompt)
 
-    # Create the AgentExecutor
+    # Create the AgentExecutor. Set verbose=True to see the agent's thought process in logs.
     agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True)
 
-    # Define the overall chain combining RAG and the agent
-    # This chain will first retrieve documents, then pass them as 'context' to the agent.
-    # The agent then decides to use tools or answer based on input, history, scratchpad, and the provided context.
-    rag_with_tools_chain = RunnableParallel(
-        # Retrieve context first using multiquery retriever
-        context=multiquery_retriever,
-        # Pass other inputs directly to the agent's input
-        input=RunnablePassthrough(),
-        chat_history=RunnablePassthrough(), # Ensure chat_history is passed through
-        agent_scratchpad=RunnablePassthrough(), # Agent needs scratchpad as well
+    # Define the overall chain combining RAG, the agent, and then reflection.
+    # The `RunnableParallel` prepares the input for the agent by first getting the RAG context.
+    # We pass the original `input` and `chat_history` through to the agent_executor as well.
+    main_agent_rag_chain = RunnableParallel(
+        context=multiquery_retriever, # This runs first to get relevant docs
+        input=RunnablePassthrough(), # Passes the original user query
+        chat_history=RunnablePassthrough(), # Passes the chat history
+        agent_scratchpad=RunnablePassthrough(), # Passes an empty scratchpad initially for the agent
     ) | agent_executor
+
+    # --- Integrate Reflection after the main agent has produced an answer ---
+    # We'll create a step that takes the agent's output and original inputs,
+    # then runs the reflection chain.
+    # For a simple one-shot reflection, we'll get the reflection feedback and
+    # then include it in the final LLM response to show the process, or let the LLM
+    # re-evaluate before giving final output.
+
+    # Simpler approach: AgentExecutor gives initial answer. Then reflection happens,
+    # and we pass BOTH to a final LLM for ultimate output.
+    final_response_prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        You are DivineGuide-Shri Krishna. A user asked a question, and an AI agent provided an initial answer.
+        You also have feedback from a self-reflection process.
+        Your task is to provide the final, refined answer to the user, incorporating the best aspects of the initial answer and addressing any feedback.
+        Ensure your response is wise, compassionate, and exclusively draws from the Bhagavad Gita's teachings.
+        
+        Original Query: {query}
+        Initial AI Answer: {initial_answer}
+        Self-Reflection Feedback: {reflection_feedback}
+        Retrieved Context (if any was used for the initial answer): {context}
+        """),
+        ("human", "Based on the above, please provide the most complete and refined answer to the user's original query."),
+    ])
+
+    # This chain orchestrates the RAG/Tool agent, then the reflection, then final answer generation.
+    full_pipeline = RunnableParallel(
+        # First, run the main agent (which includes RAG and tool use)
+        agent_output=main_agent_rag_chain,
+        # Pass original query, history, and context through for later steps
+        original_input=RunnablePassthrough(lambda x: x["input"]), # Get original input from the outer RunnableParallel
+        original_chat_history=RunnablePassthrough(lambda x: x["chat_history"]),
+        retrieved_context=RunnablePassthrough(lambda x: x["context"]) # This will be the Documents from the retriever
+    ).with_config(run_name="Initial_Agent_Run") | RunnableParallel(
+        # Now, prepare inputs for reflection
+        reflection_feedback=RunnableParallel(
+            query=RunnablePassthrough(lambda x: x["original_input"]),
+            answer=RunnablePassthrough(lambda x: x["agent_output"]["output"]), # Get the actual answer string
+            context=RunnablePassthrough(lambda x: x["retrieved_context"]), # Pass the retrieved context documents
+            # intermediate_steps=RunnablePassthrough(lambda x: x["agent_output"]["intermediate_steps"]) # If we want to include agent's internal steps
+        ) | reflection_chain, # Run the reflection LLM
+        # Pass through initial agent output and original inputs for final answer generation
+        initial_answer_from_agent=RunnablePassthrough(lambda x: x["agent_output"]["output"]),
+        original_input_for_final=RunnablePassthrough(lambda x: x["original_input"]),
+        original_chat_history_for_final=RunnablePassthrough(lambda x: x["original_chat_history"]),
+        retrieved_context_for_final=RunnablePassthrough(lambda x: x["retrieved_context"])
+    ).with_config(run_name="Reflection_And_Preparation") | RunnableParallel(
+        final_answer=final_response_prompt | llm | StrOutputParser(),
+        # Pass through intermediate results if you want them in the final FastAPI response
+        initial_answer=RunnablePassthrough(lambda x: x["initial_answer_from_agent"]),
+        reflection_feedback=RunnablePassthrough(lambda x: x["reflection_feedback"])
+    ).with_config(run_name="Final_Answer_Generation")
 
 
     with_message_history = RunnableWithMessageHistory(
-        rag_with_tools_chain, # Use the new agent-based chain
+        full_pipeline, # Use the new comprehensive pipeline
         get_session_history,
-        input_messages_key="input",
-        history_messages_key="chat_history",
-        # agent_scratchpad is handled internally by AgentExecutor, context by RunnableParallel
+        input_messages_key="original_input_for_final", # Key for user input to the entire history-managed chain
+        history_messages_key="original_chat_history_for_final", # Key for chat history to the entire history-managed chain
+        # All other inputs are handled by the RunnableParallel steps
     )
     
     history_obj = None
     try:
-        # We need to provide all inputs that the agent_executor expects through the chain,
-        # specifically 'input', 'chat_history', and 'agent_scratchpad' (even if empty initially).
-        # The 'context' will be populated by the 'multiquery_retriever' part of RunnableParallel.
+        # The invoke method of RunnableWithMessageHistory now expects just the original input and config
+        # The internal chain will handle passing it around.
         result = with_message_history.invoke(
-            {"input": query, "chat_history": get_session_history(user_id).messages, "agent_scratchpad": []},
+            {"input": query, "chat_history": get_session_history(user_id).messages},
             config={"configurable": {"session_id": user_id}}
         )
         
         history_obj = get_session_history(user_id) 
 
-        # The result of AgentExecutor is usually directly the final answer
-        ai_answer = result["output"] # AgentExecutor returns 'output' key
+        # The result of the `full_pipeline` is what we return
+        # It will contain 'final_answer', 'initial_answer', 'reflection_feedback'
+        ai_answer = result["final_answer"]
+
+        # Optionally, you can log the reflection feedback for debugging
+        print(f"\n--- Self-Reflection Feedback for '{query}' ---")
+        print(result.get("reflection_feedback", "No reflection feedback generated."))
+        print("-------------------------------------------\n")
 
         return {
             "query": query,
-            "answer": ai_answer
+            "answer": ai_answer,
+            "initial_answer_before_reflection": result.get("initial_answer"), # Optional: to see the raw agent output
+            "reflection_feedback": result.get("reflection_feedback") # Optional: to expose feedback in API
         }
     except Exception as e:
-        print(f"Error during RAG chain invocation for query '{query}', user '{user_id}': {e}")
+        print(f"Error during agent chain invocation for query '{query}', user '{user_id}': {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to process query: {e}. Please check server logs.")
